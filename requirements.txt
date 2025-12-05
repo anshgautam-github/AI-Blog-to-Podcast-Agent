@@ -1,0 +1,8 @@
+streamlit
+elevenlabs
+firecrawl
+langchain-openai
+langgraph
+openai
+python-dotenv
+typing_extensions
