@@ -1,106 +1,87 @@
 import os
-from typing import Optional, Dict, Any, TypedDict
-
-# Load .env (for local development)
+from typing import Dict, Any, TypedDict
 from dotenv import load_dotenv
+
+# Load env
 load_dotenv()
 
-# Fix Streamlit watcher issue
 os.environ["STREAMLIT_SERVER_FILE_WATCHER_TYPE"] = "none"
 
 import streamlit as st
+import requests
+from bs4 import BeautifulSoup
+from youtube_transcript_api import YouTubeTranscriptApi
 from elevenlabs import ElevenLabs
-from firecrawl import Firecrawl
 from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, END
 
+# -----------------------------
+# STREAMLIT UI
+# -----------------------------
+st.set_page_config(page_title="Blog → Podcast Agent", page_icon="🎙️")
+st.title("📰 ➡️ 🎙️ Blog to Podcast Agent (Smart)")
+
+url = st.text_input("Enter Blog or YouTube URL:")
+
 
 # -----------------------------
-# STREAMLIT: PAGE SETUP
+# ENV CHECK
 # -----------------------------
-st.set_page_config(page_title="📰 ➡️ 🎙️ Blog to Podcast Agent", page_icon="🎙️")
-st.title("📰 ➡️ 🎙️ Blog to Podcast Agent (LangGraph)")
+required_keys = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY"]
+missing = [k for k in required_keys if not os.environ.get(k)]
 
-
-# -----------------------------
-# CHECK REQUIRED ENV VARIABLES
-# -----------------------------
-required_keys = ["OPENAI_API_KEY", "ELEVENLABS_API_KEY", "FIRECRAWL_API_KEY"]
-missing_keys = [k for k in required_keys if not os.environ.get(k)]
-
-if missing_keys:
-    st.error(f"❌ Missing environment variables: {', '.join(missing_keys)}")
-    st.info("Create a .env file or export them in your terminal.")
+if missing:
+    st.error(f"Missing env vars: {', '.join(missing)}")
     st.stop()
 
 
 # -----------------------------
-# INPUT: BLOG URL
+# SCRAPERS
 # -----------------------------
-url = st.text_input("Enter Blog URL:", "")
 
 
-# -----------------------------
-# FIRECRAWL SCRAPER HELPERS
-# -----------------------------
-def _extract_text_from_firecrawl(doc: Any) -> Optional[str]:
-    if not isinstance(doc, dict):
-        return None
 
-    for key in ("markdown", "content", "text", "pageContent"):
-        if key in doc and isinstance(doc[key], str) and doc[key].strip():
-            return doc[key]
+def get_youtube_transcript(url: str) -> str:
+    try:
+        video_id = url.split("v=")[-1].split("&")[0]
 
-    data = doc.get("data")
-    if isinstance(data, dict):
-        for key in ("markdown", "content", "text", "pageContent"):
-            val = data.get(key)
-            if isinstance(val, str) and val.strip():
-                return val
+        api = YouTubeTranscriptApi()
+        transcript = api.fetch(video_id)
 
-    if isinstance(data, list):
-        for item in data:
-            if isinstance(item, dict):
-                for key in ("markdown", "content", "text", "pageContent"):
-                    val = item.get(key)
-                    if isinstance(val, str) and val.strip():
-                        return val
+        return " ".join([t.text for t in transcript])
 
-    document = doc.get("document")
-    if isinstance(document, dict):
-        for key in ("markdown", "content", "text", "pageContent"):
-            val = document.get(key)
-            if isinstance(val, str) and val.strip():
-                return val
+    except Exception as e:
+        return f"Error fetching transcript: {str(e)}"
 
-    documents = doc.get("documents")
-    if isinstance(documents, list):
-        for item in documents:
-            if isinstance(item, dict):
-                for key in ("markdown", "content", "text", "pageContent"):
-                    val = item.get(key)
-                    if isinstance(val, str) and val.strip():
-                        return val
+def scrape_webpage(url: str) -> str:
+    headers = {"User-Agent": "Mozilla/5.0"}
+    res = requests.get(url, headers=headers, timeout=10)
 
-    return None
+    soup = BeautifulSoup(res.text, "html.parser")
+
+    for tag in soup(["script", "style"]):
+        tag.decompose()
+
+    text = soup.get_text(separator="\n")
+    lines = [line.strip() for line in text.splitlines()]
+    clean = "\n".join(line for line in lines if line)
+
+    return clean[:10000]
 
 
-def scrape_blog(url: str) -> str:
-    api_key = os.environ.get("FIRECRAWL_API_KEY")
-    firecrawl = Firecrawl(api_key=api_key)
-
-    doc = firecrawl.scrape(url=url, formats=["markdown"])
-    content = _extract_text_from_firecrawl(doc)
-
-    return content if content else str(doc)
+def extract_content(url: str) -> str:
+    if "youtube.com" in url or "youtu.be" in url:
+        return get_youtube_transcript(url)
+    else:
+        return scrape_webpage(url)
 
 
 # -----------------------------
 # LANGGRAPH STATE
 # -----------------------------
-class PodcastState(TypedDict, total=False):
+class State(TypedDict):
     url: str
-    blog_content: str
+    content: str
     summary: str
 
 
@@ -109,84 +90,81 @@ class PodcastState(TypedDict, total=False):
 # -----------------------------
 if st.button("🎙️ Generate Podcast"):
     if not url.strip():
-        st.warning("Please enter a blog URL")
+        st.warning("Enter a valid URL")
     else:
-        with st.spinner("Scraping blog and generating podcast..."):
+        with st.spinner("Processing..."):
             try:
-                # LLM
-                llm = ChatOpenAI(
-                    model="gpt-4o",
-                    temperature=0.3,
-                )
+                llm = ChatOpenAI(model="gpt-4o", temperature=0.3)
 
-                # Nodes
-                def scrape_node(state: PodcastState) -> Dict[str, Any]:
-                    content = scrape_blog(state["url"])
-                    return {"blog_content": content}
+                def scrape_node(state: State) -> Dict[str, Any]:
+                    return {"content": extract_content(state["url"])}
 
-                def summarize_node(state: PodcastState) -> Dict[str, Any]:
-                    blog_content = state["blog_content"]
-
+                def summarize_node(state: State) -> Dict[str, Any]:
                     prompt = f"""
-You are a helpful AI that turns blog posts into podcast-ready scripts.
+                                    You are a professional podcast writer.
 
-Requirements:
-- Max 2000 characters
-- Conversational tone
-- No meta commentary
+                                    Your task:
+                                    Convert the given content into a clean, standalone podcast script.
 
-Blog:
-{blog_content}
-"""
+                                    STRICT RULES:
+                                    - Remove references to videos, channels, or “next/previous video”
+                                    - Remove phrases like “subscribe”, “like”, “comment”
+                                    - Do NOT mention YouTube or that this came from a video
+                                    - Do NOT say “in this video”
+                                    - Rewrite content as a smooth, self-contained narration
+                                    - Make it sound like a podcast host speaking to listeners
+                                    - Add a natural intro and closing line
+                                    - Keep it conversational and engaging
+                                    - Max 2000 characters
 
-                    response = llm.invoke(prompt)
-                    return {"summary": response.content}
+                                    CONTENT:
+                                    {state['content']}
+                            """
+                    res = llm.invoke(prompt)
+                    return {"summary": res.content}
 
-                # Graph
-                graph_builder = StateGraph(PodcastState)
-                graph_builder.add_node("scrape", scrape_node)
-                graph_builder.add_node("summarize", summarize_node)
+                graph = StateGraph(State)
 
-                graph_builder.set_entry_point("scrape")
-                graph_builder.add_edge("scrape", "summarize")
-                graph_builder.add_edge("summarize", END)
+                graph.add_node("scrape", scrape_node)
+                graph.add_node("summarize", summarize_node)
 
-                graph = graph_builder.compile()
+                graph.set_entry_point("scrape")
+                graph.add_edge("scrape", "summarize")
+                graph.add_edge("summarize", END)
 
-                # Run
-                final_state = graph.invoke({"url": url})
-                summary = final_state.get("summary", "")
+                app = graph.compile()
+
+                result = app.invoke({"url": url})
+                summary = result.get("summary", "")
 
                 if summary:
-                    # TTS
                     client = ElevenLabs(
                         api_key=os.environ.get("ELEVENLABS_API_KEY")
                     )
 
-                    audio_generator = client.text_to_speech.convert(
+                    audio = client.text_to_speech.convert(
                         text=summary,
                         voice_id="JBFqnCBsd6RMkjVDRZzb",
                         model_id="eleven_multilingual_v2",
                     )
 
-                    audio_bytes = b"".join([chunk for chunk in audio_generator if chunk])
+                    audio_bytes = b"".join(chunk for chunk in audio if chunk)
 
-                    # Output
-                    st.success("Podcast generated! 🎧")
+                    st.success("Podcast ready 🎧")
                     st.audio(audio_bytes, format="audio/mp3")
 
                     st.download_button(
-                        "Download Podcast",
+                        "Download",
                         audio_bytes,
                         "podcast.mp3",
                         "audio/mp3",
                     )
 
-                    with st.expander("📄 Podcast Summary"):
+                    with st.expander("📄 Script"):
                         st.write(summary)
 
                 else:
-                    st.error("Failed to generate summary")
+                    st.error("Failed to generate")
 
             except Exception as e:
                 st.error(f"Error: {e}")
