@@ -101,25 +101,32 @@ if st.button("🎙️ Generate Podcast"):
 
                 def summarize_node(state: State) -> Dict[str, Any]:
                     prompt = f"""
-                                    You are a professional podcast writer.
+                        
+                                You are a professional podcast script writer.
 
-                                    Your task:
-                                    Convert the given content into a clean, standalone podcast script.
+                                Your task:
+                                Convert the given content into a clean, natural podcast narration.
 
-                                    STRICT RULES:
-                                    - Remove references to videos, channels, or “next/previous video”
-                                    - Remove phrases like “subscribe”, “like”, “comment”
-                                    - Do NOT mention YouTube or that this came from a video
-                                    - Do NOT say “in this video”
-                                    - Rewrite content as a smooth, self-contained narration
-                                    - Make it sound like a podcast host speaking to listeners
-                                    - Add a natural intro and closing line
-                                    - Keep it conversational and engaging
-                                    - Max 2000 characters
+                                STRICT RULES:
+                                - DO NOT include any stage directions like "[Intro Music]", "[Outro]", etc.
+                                - DO NOT use placeholders like "[Your Name]"
+                                - The host name must ALWAYS be "Mr. X"
+                                - Start directly with a natural spoken intro (no brackets)
+                                - Remove all references to videos, YouTube, or "next/previous video"
+                                - Remove phrases like "subscribe", "like", "comment"
+                                - Make it sound like a real human speaking
+                                - Keep it smooth, engaging, and conversational
+                                - Add a proper ending line
+                                - Max 2000 characters
 
-                                    CONTENT:
-                                    {state['content']}
-                            """
+                                STYLE:
+                                - Friendly podcast tone
+                                - No formatting symbols like [] or ()
+
+                                CONTENT:
+                                {state['content']}
+"""
+                        
                     res = llm.invoke(prompt)
                     return {"summary": res.content}
 
